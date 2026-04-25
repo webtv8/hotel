@@ -1,0 +1,97 @@
+name: IPTV Channel Scraper
+
+on:
+  schedule:
+    # 每 12 小时执行一次 (UTC 00:00 和 12:00)
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+    # 允许手动触发
+    inputs:
+      max_pages:
+        description: '抓取页数'
+        required: false
+        default: '10'
+      workers:
+        description: '并发线程数'
+        required: false
+        default: '5'
+
+env:
+  PYTHON_VERSION: '3.11'
+  MAX_PAGES: '10'
+  WORKERS: '5'
+  OUTPUT_DIR: 'iptv_channels'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 配置 Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      # 3. 安装依赖
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. 运行采集器
+      - name: Run scraper
+        run: |
+          MAX_PAGES="${{ github.event.inputs.max_pages || env.MAX_PAGES }}"
+          WORKERS="${{ github.event.inputs.workers || env.WORKERS }}"
+          python iptv.py \
+            --max-pages "$MAX_PAGES" \
+            --workers "$WORKERS" \
+            --output-dir "$OUTPUT_DIR"
+
+      # 5. 检查是否有数据更新
+      - name: Check for changes
+        id: check
+        run: |
+          if [ -d "$OUTPUT_DIR" ] && [ "$(ls -A $OUTPUT_DIR/*.txt 2>/dev/null)" ]; then
+            echo "has_data=true" >> "$GITHUB_OUTPUT"
+            FILE_COUNT=$(ls -1 "$OUTPUT_DIR"/*.txt 2>/dev/null | wc -l)
+            CHANNEL_COUNT=$(cat "$OUTPUT_DIR"/*.txt 2>/dev/null | wc -l)
+            echo "file_count=$FILE_COUNT" >> "$GITHUB_OUTPUT"
+            echo "channel_count=$CHANNEL_COUNT" >> "$GITHUB_OUTPUT"
+            echo "### 采集结果" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 分组文件: **${FILE_COUNT}** 个" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 频道总数: **${CHANNEL_COUNT}** 条" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "has_data=false" >> "$GITHUB_OUTPUT"
+            echo "### 采集结果" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 本次未采集到数据" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # 6. 提交更新到仓库
+      - name: Commit and push
+        if: steps.check.outputs.has_data == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$OUTPUT_DIR/"
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+          FILES=${{ steps.check.outputs.file_count }}
+          CHANNELS=${{ steps.check.outputs.channel_count }}
+          git commit -m "chore: 自动更新 ${TIMESTAMP} [${FILES}文件/${CHANNELS}频道]" || echo "无变更"
+          git push
+
+      # 7. 上传产物（保留 30 天）
+      - name: Upload artifacts
+        if: steps.check.outputs.has_data == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: iptv-channels-${{ github.run_number }}
+          path: ${{ env.OUTPUT_DIR }}/*.txt
+          retention-days: 30
